@@ -1,6 +1,9 @@
 {
   "name": "connection-migrator",
   "version": "1.0.0",
+  "scripts": {
+    "script": "ts-node index.ts"
+  },
   "devDependencies": {
     "ts-node": "^10.9.1",
     "typescript": "^5.0.4"

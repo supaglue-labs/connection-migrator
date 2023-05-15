@@ -6,15 +6,15 @@ import { Client } from 'pg';
  * Fill these in
  */
 // Enter the api key for the Application you created in Supaglue Cloud. We will migrate connections to the corresponding Application.
-const apiKey = '...';
+const apiKey = '';
 
 // Run this command to get the secret you are using in your self-hosted K8s Supaglue instance to encrypt/decrypt connection credentials
 // echo $(kubectl -n supaglue get secret -o json supaglue-secret | jq '.data."db-encryption-secret"' -r | base64 -d)
-const secret = '...';
+const secret = '';
 
 // Run this command to get the password you are using in your self-hosted K8s Supaglue instance to connect to Postgres
 // echo $(kubectl get secrets supaglue-postgresql -n supaglue -o jsonpath='{.data.password}' | base64 -d)
-const pgPassword = '...';
+const pgPassword = '';
 
 
 /**

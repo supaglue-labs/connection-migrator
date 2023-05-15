@@ -8,9 +8,6 @@ import { Client } from 'pg';
 // Enter the application id for the application you are migrating from in your self-hosted K8s Supaglue instance
 const fromApplicationId = '...';
 
-// Enter the api key for the Application you created in Supaglue Cloud. We will migrate connections to the corresponding Application.
-const apiKey = '...';
-
 // Run this command to get the secret you are using in your self-hosted K8s Supaglue instance to encrypt/decrypt connection credentials
 // echo $(kubectl -n supaglue get secret -o json supaglue-secret | jq '.data."db-encryption-secret"' -r | base64 -d)
 const secret = '...';
@@ -19,6 +16,8 @@ const secret = '...';
 // echo $(kubectl get secrets supaglue-postgresql -n supaglue -o jsonpath='{.data.password}' | base64 -d)
 const pgPassword = '...';
 
+// Enter the api key for the new Application you created in Supaglue Cloud. We will migrate connections to the corresponding Application.
+const apiKey = '...';
 
 /**
  * Do not touch anything beyond this
@@ -26,7 +25,7 @@ const pgPassword = '...';
 const pgDatabase = 'supaglue'; // docker: postgres
 const pgSchema = 'public'; // docker: api
 const pgUser = 'supaglue'; // docker: postgres
-const pgPort = 5432; // 5432
+const pgPort = 5434; // 5432
 // const pgPassword = 'supaglue'; // (on docker)
 
 
@@ -95,6 +94,7 @@ async function decrypt(buffer: Buffer): Promise<Credentials> {
 
 type Credentials = {
   refreshToken: string;
+  instanceUrl?: string;
 };
 
 type Integration = {
@@ -112,13 +112,13 @@ async function listIntegrations(): Promise<Integration[]> {
   return response.data;
 }
 
-async function getHubspotIntegrationId(): Promise<string> {
+async function getIntegrationIdForProviderName(providerName: string): Promise<string> {
   const integrations = await listIntegrations();
-  const hubspotIntegration = integrations.find((integration) => integration.provider_name === 'hubspot');
-  if (!hubspotIntegration) {
-    throw new Error('Hubspot integration not found on Supaglue Cloud. Please create one first.');
+  const integration = integrations.find((integration) => integration.provider_name === providerName);
+  if (!integration) {
+    throw new Error(`${providerName} integration not found on Supaglue Cloud. Please create one first.`);
   }
-  return hubspotIntegration.id;
+  return integration.id;
 }
 
 type ConnectionCreateParams = {
@@ -126,10 +126,12 @@ type ConnectionCreateParams = {
   credentials: {
     type: 'oauth2';
     refresh_token: string;
+    refreshToken: string;
+    instance_url?: string;
   }
 };
 
-async function createHubspotConnection(customerId: string, params: ConnectionCreateParams): Promise<void> {
+async function createConnection(customerId: string, params: ConnectionCreateParams): Promise<void> {
   await axios.post(`${apiUrl}/mgmt/v1/customers/${encodeURIComponent(customerId)}/connections`, params, {
     headers: {
       'x-api-key': apiKey,
@@ -181,9 +183,13 @@ async function migrateSingle(connectionId: string): Promise<void> {
   const customerId = connection.full_customer_id.split(':')[1];
   console.log(`Connection belongs to customer ${customerId}`);
 
-  if (connection.provider_name !== 'hubspot') {
-    throw new Error('Connection is not a Hubspot connection');
+  if (connection.provider_name !== 'hubspot' && connection.provider_name !== 'salesforce') {
+    throw new Error(`Connection type not supported: ${connection.provider_name}`);
   }
+
+  console.log('Fetching corresponding integration from Cloud...');
+  const integrationId = await getIntegrationIdForProviderName(connection.provider_name);
+  console.log('Found hubspot integration in Cloud!');
 
   console.log(`Upserting customer ${customerId} on Cloud...`);
   const customer = {
@@ -198,10 +204,6 @@ async function migrateSingle(connectionId: string): Promise<void> {
   const decrypted = await decrypt(Buffer.from(connection.credentials, 'hex'));
   console.log('Decrypted credentials!');
 
-  console.log('Fetching hubspot integration from Cloud...');
-  const hubspotIntegrationId = await getHubspotIntegrationId();
-  console.log('Found hubspot integration in Cloud!');
-
   console.log('Checking if connection already exists on Cloud...');
   const numConnectionsOnCloud = await getConnectionCountForCustomerIdOnCloud(customerId);
   if (numConnectionsOnCloud > 0) {
@@ -211,13 +213,16 @@ async function migrateSingle(connectionId: string): Promise<void> {
   }
 
   console.log('Creating connection on Cloud...');
-  await createHubspotConnection(customerId, {
-    integration_id: hubspotIntegrationId,
+  const params = {
+    integration_id: integrationId,
     credentials: {
-      type: 'oauth2',
+      type: 'oauth2' as const,
       refresh_token: decrypted.refreshToken,
+      refreshToken: decrypted.refreshToken,
+      instance_url: decrypted.instanceUrl
     },
-  });
+  };
+  await createConnection(customerId, params);
   console.log('Connection created on Cloud!');
   console.log();
 }

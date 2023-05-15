@@ -5,16 +5,19 @@ import { Client } from 'pg';
 /**
  * Fill these in
  */
+// Enter the application id for the application you are migrating from in your self-hosted K8s Supaglue instance
+const fromApplicationId = '...';
+
 // Enter the api key for the Application you created in Supaglue Cloud. We will migrate connections to the corresponding Application.
-const apiKey = '';
+const apiKey = '...';
 
 // Run this command to get the secret you are using in your self-hosted K8s Supaglue instance to encrypt/decrypt connection credentials
 // echo $(kubectl -n supaglue get secret -o json supaglue-secret | jq '.data."db-encryption-secret"' -r | base64 -d)
-const secret = '';
+const secret = '...';
 
 // Run this command to get the password you are using in your self-hosted K8s Supaglue instance to connect to Postgres
 // echo $(kubectl get secrets supaglue-postgresql -n supaglue -o jsonpath='{.data.password}' | base64 -d)
-const pgPassword = '';
+const pgPassword = '...';
 
 
 /**
@@ -29,10 +32,20 @@ const pgPort = 5432; // 5432
 
 const apiUrl = 'https://api.supaglue.io';
 
+type ConnectionWithCustomer = {
+  id: string;
+  provider_name: string;
+  credentials: string;
+
+  full_customer_id: string;
+  customer_name: string;
+  customer_email: string;
+};
+
 /**
  * Do not modify
  */
-async function listConnections(): Promise<{ id: string, provider_name: string, customer_id: string, credentials: string }[]> {
+async function listConnections(): Promise<ConnectionWithCustomer[]> {
   const client = new Client({
     host: 'localhost',
     port: pgPort,
@@ -42,7 +55,7 @@ async function listConnections(): Promise<{ id: string, provider_name: string, c
   });
   await client.connect();
 
-  const res = await client.query(`select id, provider_name, customer_id, encode(credentials, 'hex') as credentials from ${pgSchema}.connections`);
+  const res = await client.query(`select c.customer_id as full_customer_id, cc.name as customer_name, cc.email as customer_email, c.id, c.provider_name, encode(c.credentials, 'hex') as credentials from ${pgSchema}.connections c join ${pgSchema}.customers cc on c.customer_id = cc.id join ${pgSchema}.integrations i on c.integration_id = i.id join ${pgSchema}.applications a on i.application_id = a.id where a.id = '${fromApplicationId}'`);
   const rows = res.rows;
 
   await client.end();
@@ -117,7 +130,7 @@ type ConnectionCreateParams = {
 };
 
 async function createHubspotConnection(customerId: string, params: ConnectionCreateParams): Promise<void> {
-  const response = await axios.post(`${apiUrl}/mgmt/v1/customers/${customerId}/connections`, params, {
+  await axios.post(`${apiUrl}/mgmt/v1/customers/${encodeURIComponent(customerId)}/connections`, params, {
     headers: {
       'x-api-key': apiKey,
       'Content-Type': 'application/json',
@@ -125,13 +138,34 @@ async function createHubspotConnection(customerId: string, params: ConnectionCre
   });
 }
 
-async function getConnectionById(connectionId: string): Promise<{ id: string, provider_name: string, customer_id: string, credentials: string }> {
+async function getConnectionById(connectionId: string): Promise<ConnectionWithCustomer> {
   const connections = await listConnections();
   const connection = connections.find((connection) => connection.id === connectionId);
   if (!connection) {
     throw new Error('Connection not found');
   }
   return connection;
+}
+
+type Customer = { customer_id: string; name: string; email: string };
+
+async function createCustomer(params: Customer): Promise<void> {
+  await axios.put(`${apiUrl}/mgmt/v1/customers`, params, {
+    headers: {
+      'x-api-key': apiKey,
+      'Content-Type': 'application/json',
+    },
+  });
+}
+
+async function getConnectionCountForCustomerIdOnCloud(customerId: string): Promise<number> {
+  const response = await axios.get(`${apiUrl}/mgmt/v1/customers/${encodeURIComponent(customerId)}/connections`, {
+    headers: {
+      'x-api-key': apiKey,
+    },
+  });
+
+  return response.data.length;
 }
 
 async function migrateAll(): Promise<void> {
@@ -144,12 +178,21 @@ async function migrateAll(): Promise<void> {
 async function migrateSingle(connectionId: string): Promise<void> {
   console.log(`---------- Migrating connection ${connectionId} ----------`);
   const connection = await getConnectionById(connectionId);
-  const customerId = connection.customer_id.split(':')[1];
+  const customerId = connection.full_customer_id.split(':')[1];
   console.log(`Connection belongs to customer ${customerId}`);
 
   if (connection.provider_name !== 'hubspot') {
     throw new Error('Connection is not a Hubspot connection');
   }
+
+  console.log(`Upserting customer ${customerId} on Cloud...`);
+  const customer = {
+    customer_id: customerId,
+    name: connection.customer_name,
+    email: connection.customer_email,
+  };
+  await createCustomer(customer);
+  console.log('Customer upserted!');
 
   console.log('Decrypting credentials...');
   const decrypted = await decrypt(Buffer.from(connection.credentials, 'hex'));
@@ -158,6 +201,14 @@ async function migrateSingle(connectionId: string): Promise<void> {
   console.log('Fetching hubspot integration from Cloud...');
   const hubspotIntegrationId = await getHubspotIntegrationId();
   console.log('Found hubspot integration in Cloud!');
+
+  console.log('Checking if connection already exists on Cloud...');
+  const numConnectionsOnCloud = await getConnectionCountForCustomerIdOnCloud(customerId);
+  if (numConnectionsOnCloud > 0) {
+    console.log('Connection already exists on Cloud!');
+    console.log();
+    return;
+  }
 
   console.log('Creating connection on Cloud...');
   await createHubspotConnection(customerId, {
@@ -178,7 +229,7 @@ if (args[0] === 'list-connections') {
   (async () => {
     const connections = await listConnections();
     for (const connection of connections) {
-      console.log(`id: ${connection.id}, provider_name: ${connection.provider_name}, customer_id: ${connection.customer_id}`);
+      console.log(`id: ${connection.id}, provider_name: ${connection.provider_name}, customer_id: ${connection.full_customer_id}`);
     }
   })();
 } else if (args[0] === 'migrate-all') {

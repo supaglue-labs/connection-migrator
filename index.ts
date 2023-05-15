@@ -25,7 +25,7 @@ const apiKey = '...';
 const pgDatabase = 'supaglue'; // docker: postgres
 const pgSchema = 'public'; // docker: api
 const pgUser = 'supaglue'; // docker: postgres
-const pgPort = 5434; // 5432
+const pgPort = 5432; // 5432
 // const pgPassword = 'supaglue'; // (on docker)
 
 

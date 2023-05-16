@@ -54,7 +54,7 @@ async function listConnections(): Promise<ConnectionWithCustomer[]> {
   });
   await client.connect();
 
-  const res = await client.query(`select c.customer_id as full_customer_id, cc.name as customer_name, cc.email as customer_email, c.id, c.provider_name, encode(c.credentials, 'hex') as credentials from ${pgSchema}.connections c join ${pgSchema}.customers cc on c.customer_id = cc.id join ${pgSchema}.integrations i on c.integration_id = i.id join ${pgSchema}.applications a on i.application_id = a.id where a.id = '${fromApplicationId}'`);
+  const res = await client.query(`select c.customer_id as full_customer_id, cc.name as customer_name, cc.email as customer_email, c.id, c.provider_name, encode(c.credentials, 'hex') as credentials from ${pgSchema}.connections c join ${pgSchema}.customers cc on c.customer_id = cc.id join ${pgSchema}.integrations i on c.integration_id = i.id join ${pgSchema}.applications a on i.application_id = a.id where a.id = '${fromApplicationId}' order by c.created_at asc`);
   const rows = res.rows;
 
   await client.end();
@@ -177,6 +177,12 @@ async function migrateAll(): Promise<void> {
   }
 }
 
+async function migrateMultiple(connectionIds: string[]): Promise<void> {
+  for (const connectionId of connectionIds) {
+    await migrateSingle(connectionId);
+  }
+}
+
 async function migrateSingle(connectionId: string): Promise<void> {
   console.log(`---------- Migrating connection ${connectionId} ----------`);
   const connection = await getConnectionById(connectionId);
@@ -237,16 +243,18 @@ if (args[0] === 'list-connections') {
       console.log(`id: ${connection.id}, provider_name: ${connection.provider_name}, customer_id: ${connection.full_customer_id}`);
     }
   })();
-} else if (args[0] === 'migrate-all') {
-  (async () => {
-    await migrateAll();
-  })();
-} else if (args[0] === 'migrate-single') {
+// } else if (args[0] === 'migrate-all') {
+//   (async () => {
+//     await migrateAll();
+//   })();
+} else if (args[0] === 'migrate') {
   if (!args[1]) {
-    console.error('Please provide a connection id');
+    console.error('Please provide at least one connection id');
     process.exit(1);
   }
+  const connectionIds = args.slice(1);
   (async () => {
-    await migrateSingle(args[1]);
+    await migrateMultiple(connectionIds);
+    // await migrateSingle(args[1]);
   })();
 }

@@ -246,7 +246,7 @@ async function migrateSingle(connectionId: string): Promise<void> {
 
   console.log('Fetching corresponding integration from Cloud...');
   const integrationId = await getIntegrationIdForProviderName(connection.provider_name);
-  console.log('Found hubspot integration in Cloud!');
+  console.log(`Found ${connection.provider_name} integration in Cloud!`);
 
   console.log(`Upserting customer ${customerId} on Cloud...`);
   const customer = {

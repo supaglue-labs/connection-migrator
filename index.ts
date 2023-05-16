@@ -1,3 +1,4 @@
+import { Connection, ScheduleNotFoundError, Client as TemporalClient, WorkflowNotFoundError } from '@temporalio/client';
 import axios from 'axios';
 import crypto from 'crypto';
 import { Client } from 'pg';
@@ -22,10 +23,16 @@ const apiKey = '...';
 /**
  * Do not touch anything beyond this
  */
+// temporal
+const temporalHost = 'localhost';
+const temporalPort = 7233;
+
+// postgres
+const pgHost = 'localhost';
+const pgPort = 5432; // 5432
 const pgDatabase = 'supaglue'; // docker: postgres
 const pgSchema = 'public'; // docker: api
 const pgUser = 'supaglue'; // docker: postgres
-const pgPort = 5432; // 5432
 // const pgPassword = 'supaglue'; // (on docker)
 
 
@@ -39,14 +46,58 @@ type ConnectionWithCustomer = {
   full_customer_id: string;
   customer_name: string;
   customer_email: string;
+
+  sync_id: string;
 };
+
+async function pauseTemporalSync(syncId: string): Promise<void> {
+  const client = new TemporalClient({
+    namespace: 'default',
+    connection: Connection.lazy({
+      address: `${temporalHost}:${temporalPort}`,
+    })
+  });
+
+  // Get schedule for syncId
+  const scheduleId = `run-sync-${syncId}`;
+  const handle = client.schedule.getHandle(scheduleId);
+
+  // Pause schedule
+  try {
+    await handle.pause('Migrating to Supaglue Cloud');
+    console.log(`Paused schedule ${scheduleId}`);
+  } catch (err) {
+    if (err instanceof ScheduleNotFoundError) {
+      console.error('Schedule not found when deleting. Ignoring for idempotency...');
+    } else {
+      throw err;
+    }
+  }
+
+  // Kill any running workflows associated with this schedule
+  const description = await handle.describe();
+  const workflowIds = description.info.runningActions.map((action) => action.workflow.workflowId);
+  const workflowHandles = workflowIds.map((workflowId) => client.workflow.getHandle(workflowId));
+  for (const workflowHandle of workflowHandles) {
+    try {
+      await workflowHandle.terminate('Migrating to Supaglue Cloud');
+      console.log(`Terminated workflow ${workflowHandle.workflowId}`);
+    } catch (err) {
+      if (err instanceof WorkflowNotFoundError) {
+        console.error('Workflow not found when deleting. Ignoring for idempotency...');
+      } else {
+        throw err;
+      }
+    }
+  }
+}
 
 /**
  * Do not modify
  */
 async function listConnections(): Promise<ConnectionWithCustomer[]> {
   const client = new Client({
-    host: 'localhost',
+    host: pgHost,
     port: pgPort,
     database: pgDatabase,
     user: pgUser,
@@ -54,7 +105,7 @@ async function listConnections(): Promise<ConnectionWithCustomer[]> {
   });
   await client.connect();
 
-  const res = await client.query(`select c.customer_id as full_customer_id, cc.name as customer_name, cc.email as customer_email, c.id, c.provider_name, encode(c.credentials, 'hex') as credentials from ${pgSchema}.connections c join ${pgSchema}.customers cc on c.customer_id = cc.id join ${pgSchema}.integrations i on c.integration_id = i.id join ${pgSchema}.applications a on i.application_id = a.id where a.id = '${fromApplicationId}' order by c.created_at asc`);
+  const res = await client.query(`select s.id as sync_id, c.customer_id as full_customer_id, cc.name as customer_name, cc.email as customer_email, c.id, c.provider_name, encode(c.credentials, 'hex') as credentials from ${pgSchema}.connections c join ${pgSchema}.customers cc on c.customer_id = cc.id join ${pgSchema}.integrations i on c.integration_id = i.id join ${pgSchema}.applications a on i.application_id = a.id join ${pgSchema}.syncs s on c.id = s.connection_id where a.id = '${fromApplicationId}' order by c.created_at asc`);
   const rows = res.rows;
 
   await client.end();
@@ -209,6 +260,10 @@ async function migrateSingle(connectionId: string): Promise<void> {
   console.log('Decrypting credentials...');
   const decrypted = await decrypt(Buffer.from(connection.credentials, 'hex'));
   console.log('Decrypted credentials!');
+
+  console.log(`Pausing Temporal sync ${connection.sync_id}...`);
+  await pauseTemporalSync(connection.sync_id);
+  console.log('Temporal sync paused!');
 
   console.log('Checking if connection already exists on Cloud...');
   const numConnectionsOnCloud = await getConnectionCountForCustomerIdOnCloud(customerId);
